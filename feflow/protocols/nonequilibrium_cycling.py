@@ -113,7 +113,7 @@ class SetupUnit(ProtocolUnit):
             The initial chemical system.
         state_b : gufe.ChemicalSystem
             The objective chemical system.
-        mapping : dict[str, gufe.mapping.ComponentMapping]
+        mapping : gufe.mapping.ComponentMapping
             A dict featuring mappings between the two chemical systems.
         settings : gufe.settings.model.Settings
             The full settings for the protocol.
@@ -123,6 +123,10 @@ class SetupUnit(ProtocolUnit):
         dict : dict[str, str]
             Dictionary with paths to work arrays, both forward and reverse, and
             trajectory coordinates for systems A and B.
+
+        Notes
+        -----
+        * Here we assume the mapping is only between ``SmallMoleculeComponent``s.
         """
         # needed imports
         import openmm
@@ -145,7 +149,7 @@ class SetupUnit(ProtocolUnit):
         # receptor_b = state_b.components.get("protein")  # Should not be needed
 
         # Get ligand/small-mol components
-        ligand_mapping = mapping["ligand"]
+        ligand_mapping = mapping
         ligand_a = ligand_mapping.componentA
         ligand_b = ligand_mapping.componentB
 
@@ -156,7 +160,7 @@ class SetupUnit(ProtocolUnit):
         # Get settings for system generator
         forcefield_settings = settings.forcefield_settings
         thermodynamic_settings = settings.thermo_settings
-        system_settings = settings.system_settings
+        integrator_settings = settings.integrator_settings
 
         # handle cache for system generator
         if settings.forcefield_cache is not None:
@@ -167,7 +171,7 @@ class SetupUnit(ProtocolUnit):
         system_generator = system_creation.get_system_generator(
             forcefield_settings=forcefield_settings,
             thermo_settings=thermodynamic_settings,
-            system_settings=system_settings,
+            integrator_settings=integrator_settings,
             cache=ffcache,
             has_solvent=solvent_a is not None,
         )
@@ -252,7 +256,7 @@ class SetupUnit(ProtocolUnit):
 
         #  c. Define correspondence mappings between the two systems
         ligand_mappings = _rfe_utils.topologyhelpers.get_system_mappings(
-            mapping["ligand"].componentA_to_componentB,
+            mapping.componentA_to_componentB,
             state_a_system,
             state_a_topology,
             comp_resids[ligand_a],
@@ -276,7 +280,12 @@ class SetupUnit(ProtocolUnit):
 
         # Get alchemical settings
         alchemical_settings = settings.alchemical_settings
-
+        # TODO: handle the literals directly in the HTF object (issue #42)
+        # Get softcore potential settings
+        if alchemical_settings.softcore_LJ.lower() == "gapsys":
+            softcore_LJ_v2 = True
+        elif alchemical_settings.softcore_LJ.lower() == "beutler":
+            softcore_LJ_v2 = False
         # Now we can create the HTF from the previous objects
         hybrid_factory = HybridTopologyFactory(
             state_a_system,
@@ -289,10 +298,9 @@ class SetupUnit(ProtocolUnit):
             old_to_new_core_atom_map=ligand_mappings["old_to_new_core_atom_map"],
             use_dispersion_correction=alchemical_settings.use_dispersion_correction,
             softcore_alpha=alchemical_settings.softcore_alpha,
-            softcore_LJ_v2=alchemical_settings.softcore_LJ_v2,
+            softcore_LJ_v2=softcore_LJ_v2,
             softcore_LJ_v2_alpha=alchemical_settings.softcore_alpha,
-            interpolate_old_and_new_14s=alchemical_settings.interpolate_old_and_new_14s,
-            flatten_torsions=alchemical_settings.flatten_torsions,
+            interpolate_old_and_new_14s=alchemical_settings.turn_off_core_unique_exceptions,
         )
         ####### END OF SETUP #########
 
@@ -301,16 +309,13 @@ class SetupUnit(ProtocolUnit):
 
         # Set up integrator
         temperature = to_openmm(thermodynamic_settings.temperature)
-        neq_steps = settings.eq_steps
-        eq_steps = settings.neq_steps
-        timestep = to_openmm(settings.timestep)
-        splitting = settings.neq_splitting
+        integrator_settings = settings.integrator_settings
         integrator = PeriodicNonequilibriumIntegrator(
             alchemical_functions=settings.lambda_functions,
-            nsteps_neq=neq_steps,
-            nsteps_eq=eq_steps,
-            splitting=splitting,
-            timestep=timestep,
+            nsteps_neq=integrator_settings.nonequilibrium_steps,
+            nsteps_eq=integrator_settings.equilibrium_steps,
+            splitting=integrator_settings.splitting,
+            timestep=to_openmm(integrator_settings.timestep),  # needs openmm Quantity
             temperature=temperature,
         )
 
@@ -454,8 +459,8 @@ class SimulationUnit(ProtocolUnit):
         context.setVelocitiesToTemperature(temperature)
 
         # Extract settings used below
-        neq_steps = settings.eq_steps
-        eq_steps = settings.neq_steps
+        neq_steps = settings.integrator_settings.nonequilibrium_steps
+        eq_steps = settings.integrator_settings.equilibrium_steps
         traj_save_frequency = settings.traj_save_frequency
         work_save_frequency = (
             settings.work_save_frequency
@@ -609,7 +614,7 @@ class SimulationUnit(ProtocolUnit):
             )
 
             # Computing performance in ns/day
-            timestep = to_openmm(settings.timestep)
+            timestep = to_openmm(settings.integrator_settings.timestep)
             simulation_time = 2 * (eq_steps + neq_steps) * timestep
             walltime_in_seconds = cycle_walltime.total_seconds() * openmm_unit.seconds
             estimated_performance = simulation_time.value_in_unit(
@@ -863,20 +868,22 @@ class NonEquilibriumCyclingProtocol(Protocol):
 
     @classmethod
     def _default_settings(cls):
-        from feflow.settings.nonequilibrium_cycling import NonEquilibriumCyclingSettings
+        from feflow.settings import (
+            NonEquilibriumCyclingSettings,
+            PeriodicNonequilibriumIntegratorSettings,
+        )
         from gufe.settings import OpenMMSystemGeneratorFFSettings, ThermoSettings
         from openfe.protocols.openmm_utils.omm_settings import (
-            SystemSettings,
-            SolvationSettings,
+            OpenMMSolvationSettings,
         )
         from openfe.protocols.openmm_rfe.equil_rfe_settings import AlchemicalSettings
 
         return NonEquilibriumCyclingSettings(
             forcefield_settings=OpenMMSystemGeneratorFFSettings(),
             thermo_settings=ThermoSettings(temperature=300 * unit.kelvin),
-            system_settings=SystemSettings(),
-            solvation_settings=SolvationSettings(),
-            alchemical_settings=AlchemicalSettings(),
+            solvation_settings=OpenMMSolvationSettings(),
+            alchemical_settings=AlchemicalSettings(softcore_LJ="gapsys"),
+            integrator_settings=PeriodicNonequilibriumIntegratorSettings(),
         )
 
     # NOTE: create method should be really fast, since it would be running in the work units not the clients!!
@@ -890,8 +897,6 @@ class NonEquilibriumCyclingProtocol(Protocol):
         # Handle parameters
         if mapping is None:
             raise ValueError("`mapping` is required for this Protocol")
-        if "ligand" not in mapping:
-            raise ValueError("'ligand' must be specified in `mapping` dict")
         if extends:
             raise NotImplementedError("Can't extend simulations yet")
 
