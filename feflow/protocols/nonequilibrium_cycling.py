@@ -25,7 +25,12 @@ from openfe.protocols.openmm_rfe._rfe_utils.compute import get_openmm_platform
 from openff.units import unit
 from openff.units.openmm import to_openmm, from_openmm
 
-from ..utils.data import serialize, deserialize
+from ..utils.data import (
+    serialize,
+    deserialize,
+    serialize_and_compress,
+    decompress_and_deserialize,
+)
 
 # Specific instance of logger for this module
 # logger = logging.getLogger(__name__)
@@ -132,6 +137,34 @@ class SetupUnit(ProtocolUnit):
         from gufe.components import SmallMoleculeComponent
         from openfe.protocols.openmm_rfe import _rfe_utils
         from feflow.utils.hybrid_topology import HybridTopologyFactory
+
+        if extends_data := self.inputs.get("extends_data"):
+
+            def _write_xml(data, filename):
+                openmm_object = decompress_and_deserialize(data)
+                serialize(openmm_object, filename)
+                return filename
+
+            for replicate in range(settings.num_replicates):
+                replicate = str(replicate)
+                system_outfile = ctx.shared / f"system_{replicate}.xml.bz2"
+                state_outfile = ctx.shared / f"state_{replicate}.xml.bz2"
+                integrator_outfile = ctx.shared / f"integrator_{replicate}.xml.bz2"
+
+                extends_data["systems"][replicate] = _write_xml(
+                    extends_data["systems"][replicate],
+                    system_outfile,
+                )
+                extends_data["states"][replicate] = _write_xml(
+                    extends_data["states"][replicate],
+                    state_outfile,
+                )
+                extends_data["integrators"][replicate] = _write_xml(
+                    extends_data["integrators"][replicate],
+                    integrator_outfile,
+                )
+
+            return extends_data
 
         # Check compatibility between states (same receptor and solvent)
         self._check_states_compatibility(state_a, state_b)
@@ -342,10 +375,18 @@ class SetupUnit(ProtocolUnit):
             # Explicit cleanup for GPU resources
             del context, integrator
 
+        systems = dict()
+        states = dict()
+        integrators = dict()
+        for replicate_name in map(str, range(settings.num_replicates)):
+            systems[replicate_name] = system_outfile
+            states[replicate_name] = state_outfile
+            integrators[replicate_name] = integrator_outfile
+
         return {
-            "system": system_outfile,
-            "state": state_outfile,
-            "integrator": integrator_outfile,
+            "systems": systems,
+            "states": states,
+            "integrators": integrators,
             "phase": phase,
             "initial_atom_indices": hybrid_factory.initial_atom_indices,
             "final_atom_indices": hybrid_factory.final_atom_indices,
@@ -434,9 +475,9 @@ class SimulationUnit(ProtocolUnit):
         file_logger.addHandler(file_handler)
 
         # Get state, system, and integrator from setup unit
-        system = deserialize(setup.outputs["system"])
-        state = deserialize(setup.outputs["state"])
-        integrator = deserialize(setup.outputs["integrator"])
+        system = deserialize(setup.outputs["systems"][self.name])
+        state = deserialize(setup.outputs["states"][self.name])
+        integrator = deserialize(setup.outputs["integrators"][self.name])
         PeriodicNonequilibriumIntegrator.restore_interface(integrator)
 
         # Get atom indices for either end of the hybrid topology
@@ -687,7 +728,20 @@ class SimulationUnit(ProtocolUnit):
                 "reverse_neq_final": reverse_neq_new_path,
             }
         finally:
+            compressed_state = serialize_and_compress(
+                context.getState(getPositions=True),
+            )
+
+            compressed_system = serialize_and_compress(
+                context.getSystem(),
+            )
+
+            compressed_integrator = serialize_and_compress(
+                context.getIntegrator(),
+            )
+
             # Explicit cleanup for GPU resources
+
             del context, integrator
 
         return {
@@ -696,6 +750,9 @@ class SimulationUnit(ProtocolUnit):
             "trajectory_paths": trajectory_paths,
             "log": output_log_path,
             "timing_info": timing_info,
+            "system": compressed_system,
+            "state": compressed_state,
+            "integrator": compressed_integrator,
         }
 
 
@@ -890,10 +947,63 @@ class NonEquilibriumCyclingProtocol(Protocol):
         # Handle parameters
         if mapping is None:
             raise ValueError("`mapping` is required for this Protocol")
+
         if "ligand" not in mapping:
             raise ValueError("'ligand' must be specified in `mapping` dict")
-        if extends:
-            raise NotImplementedError("Can't extend simulations yet")
+
+        extends_data = {}
+        if isinstance(extends, ProtocolDAGResult):
+
+            if not extends.ok():
+                raise ValueError("Cannot extend protocols that failed")
+
+            setup = extends.protocol_units[0]
+            simulations = extends.protocol_units[1:-1]
+
+            r_setup = extends.protocol_unit_results[0]
+            r_simulations = extends.protocol_unit_results[1:-1]
+
+            # confirm consistency
+            original_state_a = setup.inputs["state_a"].key
+            original_state_b = setup.inputs["state_b"].key
+            original_mapping = setup.inputs["mapping"]
+
+            if original_state_a != stateA.key:
+                raise ValueError(
+                    "'stateA' key is not the same as the key provided by the 'extends' ProtocolDAGResult."
+                )
+
+            if original_state_b != stateB.key:
+                raise ValueError(
+                    "'stateB' key is not the same as the key provided by the 'extends' ProtocolDAGResult."
+                )
+
+            if mapping is not None:
+                if original_mapping != mapping:
+                    raise ValueError(
+                        "'mapping' is not consistent with the mapping provided by the 'extnds' ProtocolDAGResult."
+                    )
+            else:
+                mapping = original_mapping
+
+            systems = {}
+            states = {}
+            integrators = {}
+
+            for r_simulation, simulation in zip(r_simulations, simulations):
+                sim_name = simulation.name
+                systems[sim_name] = r_simulation.outputs["system"]
+                states[sim_name] = r_simulation.outputs["state"]
+                integrators[sim_name] = r_simulation.outputs["integrator"]
+
+            extends_data = dict(
+                systems=systems,
+                states=states,
+                integrators=integrators,
+                phase=r_setup.outputs["phase"],
+                initial_atom_indices=r_setup.outputs["initial_atom_indices"],
+                final_atom_indices=r_setup.outputs["final_atom_indices"],
+            )
 
         # inputs to `ProtocolUnit.__init__` should either be `Gufe` objects
         # or JSON-serializable objects
@@ -905,6 +1015,7 @@ class NonEquilibriumCyclingProtocol(Protocol):
             mapping=mapping,
             settings=self.settings,
             name="setup",
+            extends_data=extends_data,
         )
 
         simulations = [
