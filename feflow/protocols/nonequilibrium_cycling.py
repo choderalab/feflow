@@ -389,8 +389,9 @@ class SetupUnit(ProtocolUnit):
         context.setPositions(positions)
 
         try:
-            # Minimize
-            openmm.LocalEnergyMinimizer.minimize(context)
+            # Minimize (if not deferred)
+            if not settings.defer_minimization:
+                openmm.LocalEnergyMinimizer.minimize(context)
 
             # SERIALIZE SYSTEM, STATE, INTEGRATOR
             # need to set velocities to temperature so serialized state features velocities,
@@ -534,6 +535,10 @@ class CycleUnit(ProtocolUnit):
         platform = get_openmm_platform(settings.engine_settings.compute_platform)
         context = openmm.Context(system, integrator, platform)
         context.setState(state)
+
+        # Minimize (if deferred)
+        if settings.defer_minimization:
+            openmm.LocalEnergyMinimizer.minimize(context)
 
         # Equilibrate
         thermodynamic_settings = settings.thermo_settings
