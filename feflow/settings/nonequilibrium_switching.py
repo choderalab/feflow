@@ -125,6 +125,11 @@ class NonEquilibriumSwitchingSettings(Settings):
     runs. Each switch produces one work value used in the BAR free energy estimate.
     """
 
+    setup_minimize: bool = (
+        True
+        # If True, minimize the system in the SetupUnit; we don't want to do this on platforms like Folding@Home
+    )
+
     # Debugging settings
     store_minimized_pdb: bool = True
     """Setting for storing pdb right after minimization (right before neq cycle)"""
