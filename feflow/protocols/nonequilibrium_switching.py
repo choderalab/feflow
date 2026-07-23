@@ -42,6 +42,56 @@ def _reversed_lambda_functions(lambda_functions: dict[str, str]) -> dict[str, st
     }
 
 
+def _evaluate_lambda_functions_at(
+    lambda_functions: dict[str, str], lam: float
+) -> dict[str, float]:
+    """
+    Evaluate alchemical lambda function expressions at a concrete lambda value.
+
+    Handles the subset of OpenMM expression syntax used by default schedules:
+    basic arithmetic, ``^`` (power), ``step(x)`` (Heaviside), and
+    ``select(cond, if_true, if_false)``.
+
+    Parameters
+    ----------
+    lambda_functions : dict[str, str]
+        Map of parameter name → OpenMM expression string (as stored in settings).
+    lam : float
+        Lambda value at which to evaluate each expression (typically 0.0 or 1.0).
+
+    Returns
+    -------
+    dict[str, float]
+        Parameter name → evaluated float value.
+    """
+    import math
+
+    namespace = {
+        "__builtins__": {},
+        "step": lambda x: 1.0 if x >= 0.0 else 0.0,
+        "select": lambda cond, if_true, if_false: if_true if cond else if_false,
+        "min": min,
+        "max": max,
+        "abs": abs,
+        "sqrt": math.sqrt,
+        "exp": math.exp,
+        "log": math.log,
+    }
+
+    if lam is None:
+        raise ValueError(
+            "_endpoint_lambda is None — subclasses of _BaseEquilibrationUnit "
+            "must set _endpoint_lambda to 0.0 or 1.0."
+        )
+
+    result = {}
+    for name, expr in lambda_functions.items():
+        py_expr = re.sub(r"\blambda\b", repr(float(lam)), expr)
+        py_expr = py_expr.replace("^", "**")
+        result[name] = float(eval(py_expr, namespace))  # noqa: S307
+    return result
+
+
 def _load_snapshot(snapshot_settings: SnapshotSettings, index: int):
     """
     Load positions and box vectors for replicate *index* from a trajectory
@@ -103,6 +153,14 @@ class _BaseEquilibrationUnit(ProtocolUnit):
 
     _snapshot_settings_key: str = ""  # "lambda0_snapshots" or "lambda1_snapshots"
     _endpoint: str = ""  # "lambda0" or "lambda1"
+    _endpoint_lambda: Optional[float] = None  # must be set by subclasses to 0.0 or 1.0
+
+    def _set_alchemical_parameters(self, context, lambda_functions: dict[str, str]):
+        """Set alchemical context parameters to the correct lambda endpoint values."""
+        for param, value in _evaluate_lambda_functions_at(
+            lambda_functions, self._endpoint_lambda
+        ).items():
+            context.setParameter(param, value)
 
     def _execute(self, ctx, *, protocol, setup, **inputs):
         import openmm
@@ -164,6 +222,10 @@ class _BaseEquilibrationUnit(ProtocolUnit):
             )
             ctx_snap = openmm.Context(system, integrator, platform)
             ctx_snap.setState(initial_state)
+            # setState only restores positions/velocities/box — not global parameters.
+            # Set alchemical parameters to the correct lambda endpoint so that
+            # stored energies/forces reflect the right physical state.
+            self._set_alchemical_parameters(ctx_snap, settings.lambda_functions)
 
             t0 = time.perf_counter()
             for i in range(num_switches):
@@ -209,6 +271,8 @@ class _BaseEquilibrationUnit(ProtocolUnit):
             )
             eq_ctx = openmm.Context(system, eq_integrator, platform)
             eq_ctx.setState(initial_state)
+            # setState only restores positions/velocities/box — not global parameters.
+            self._set_alchemical_parameters(eq_ctx, settings.lambda_functions)
             eq_ctx.setVelocitiesToTemperature(temperature)
 
             t0 = time.perf_counter()
@@ -251,6 +315,7 @@ class Lambda0EquilibrationUnit(_BaseEquilibrationUnit):
 
     _snapshot_settings_key = "lambda0_snapshots"
     _endpoint = "lambda0"
+    _endpoint_lambda = 0.0
 
 
 class Lambda1EquilibrationUnit(_BaseEquilibrationUnit):
@@ -258,6 +323,7 @@ class Lambda1EquilibrationUnit(_BaseEquilibrationUnit):
 
     _snapshot_settings_key = "lambda1_snapshots"
     _endpoint = "lambda1"
+    _endpoint_lambda = 1.0
 
 
 class _BaseSwitchingUnit(ProtocolUnit):
