@@ -42,6 +42,12 @@ def _reversed_lambda_functions(lambda_functions: dict[str, str]) -> dict[str, st
     }
 
 
+def _set_alchemical_parameters(context, lambda_functions: dict[str, str], lam: float):
+    """Set all alchemical global parameters on *context* to their values at *lam*."""
+    for param, value in _evaluate_lambda_functions_at(lambda_functions, lam).items():
+        context.setParameter(param, value)
+
+
 def _evaluate_lambda_functions_at(
     lambda_functions: dict[str, str], lam: float
 ) -> dict[str, float]:
@@ -155,13 +161,6 @@ class _BaseEquilibrationUnit(ProtocolUnit):
     _endpoint: str = ""  # "lambda0" or "lambda1"
     _endpoint_lambda: Optional[float] = None  # must be set by subclasses to 0.0 or 1.0
 
-    def _set_alchemical_parameters(self, context, lambda_functions: dict[str, str]):
-        """Set alchemical context parameters to the correct lambda endpoint values."""
-        for param, value in _evaluate_lambda_functions_at(
-            lambda_functions, self._endpoint_lambda
-        ).items():
-            context.setParameter(param, value)
-
     def _execute(self, ctx, *, protocol, setup, **inputs):
         import openmm
         import openmm.unit as openmm_unit
@@ -225,7 +224,7 @@ class _BaseEquilibrationUnit(ProtocolUnit):
             # setState only restores positions/velocities/box — not global parameters.
             # Set alchemical parameters to the correct lambda endpoint so that
             # stored energies/forces reflect the right physical state.
-            self._set_alchemical_parameters(ctx_snap, settings.lambda_functions)
+            _set_alchemical_parameters(ctx_snap, settings.lambda_functions, self._endpoint_lambda)
 
             t0 = time.perf_counter()
             for i in range(num_switches):
@@ -272,7 +271,7 @@ class _BaseEquilibrationUnit(ProtocolUnit):
             eq_ctx = openmm.Context(system, eq_integrator, platform)
             eq_ctx.setState(initial_state)
             # setState only restores positions/velocities/box — not global parameters.
-            self._set_alchemical_parameters(eq_ctx, settings.lambda_functions)
+            _set_alchemical_parameters(eq_ctx, settings.lambda_functions, self._endpoint_lambda)
             eq_ctx.setVelocitiesToTemperature(temperature)
 
             t0 = time.perf_counter()
@@ -414,6 +413,14 @@ class _BaseSwitchingUnit(ProtocolUnit):
         )
         neq_ctx = openmm.Context(system, neq_integrator, platform)
         neq_ctx.setState(snap_state)
+        # setState does not restore global parameters. Set them to the values the
+        # NEQ integrator expects at the start of the switch (internal lambda=0) so
+        # the first force evaluation is at the correct physical state.
+        # lambda_functions already encodes the direction: for the forward switch they
+        # are the raw settings functions (0.0 → physical lambda=0), for the reverse
+        # switch they are the reversed functions (_reversed_lambda_functions), so
+        # evaluating at 0.0 gives physical lambda=1 in that case.
+        _set_alchemical_parameters(neq_ctx, lambda_functions, 0.0)
 
         # # Adding minimization in the base switching unit. Helped to avoid NaNs in cases.
         # t_min0 = time.perf_counter()
