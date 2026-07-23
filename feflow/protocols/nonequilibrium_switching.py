@@ -335,9 +335,7 @@ class _BaseSwitchingUnit(ProtocolUnit):
         platform = get_openmm_platform(settings.engine_settings.compute_platform)
         timing_info = {}
 
-        # ------------------------------------------------------------------
         # NEQ switch
-        # ------------------------------------------------------------------
         lambda_functions = self._get_lambda_functions(settings)
 
         neq_integrator = AlchemicalNonequilibriumLangevinIntegrator(
@@ -351,14 +349,18 @@ class _BaseSwitchingUnit(ProtocolUnit):
         neq_ctx = openmm.Context(system, neq_integrator, platform)
         neq_ctx.setState(snap_state)
 
-        # Adding minimization in the base switching unit. Helped to avoid NaNs in cases.
-        t_min0 = time.perf_counter()
-        openmm.LocalEnergyMinimizer.minimize(neq_ctx)
-        timing_info["minimization_time_in_s"] = time.perf_counter() - t_min0
-        file_logger.info(
-            f"{self.name}: minimized starting snapshot "
-            f"({timing_info['minimization_time_in_s']:.1f} s)"
-        )
+        # # Adding minimization in the base switching unit. Helped to avoid NaNs in cases.
+        # t_min0 = time.perf_counter()
+        # openmm.LocalEnergyMinimizer.minimize(neq_ctx)
+        # timing_info["minimization_time_in_s"] = time.perf_counter() - t_min0
+        # file_logger.info(
+        #     f"{self.name}: minimized starting snapshot "
+        #     f"({timing_info['minimization_time_in_s']:.1f} s)"
+        # )
+        # # Reassign velocities after minimization: the minimizer moves atoms but
+        # # leaves velocities from the snapshot, which are now inconsistent with
+        # # the new positions and can cause instability at the start of the switch.
+        # neq_ctx.setVelocitiesToTemperature(temperature)
 
         works = [neq_integrator.get_protocol_work(dimensionless=True)]
         initial_traj, final_traj = [], []
@@ -390,9 +392,7 @@ class _BaseSwitchingUnit(ProtocolUnit):
         timing_info[f"neq_{self._direction}_time_in_s"] = neq_elapsed.total_seconds()
         file_logger.info(f"{self.name}: NEQ switch time: {neq_elapsed}")
 
-        # ------------------------------------------------------------------
         # Serialize outputs
-        # ------------------------------------------------------------------
         work_path = ctx.shared / f"{self._direction}_{self.name}.npy"
         initial_traj_path = ctx.shared / f"{self._direction}_initial_{self.name}.npy"
         final_traj_path = ctx.shared / f"{self._direction}_final_{self.name}.npy"
