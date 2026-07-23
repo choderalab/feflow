@@ -224,7 +224,9 @@ class _BaseEquilibrationUnit(ProtocolUnit):
             # setState only restores positions/velocities/box — not global parameters.
             # Set alchemical parameters to the correct lambda endpoint so that
             # stored energies/forces reflect the right physical state.
-            _set_alchemical_parameters(ctx_snap, settings.lambda_functions, self._endpoint_lambda)
+            _set_alchemical_parameters(
+                ctx_snap, settings.lambda_functions, self._endpoint_lambda
+            )
 
             t0 = time.perf_counter()
             for i in range(num_switches):
@@ -271,7 +273,9 @@ class _BaseEquilibrationUnit(ProtocolUnit):
             eq_ctx = openmm.Context(system, eq_integrator, platform)
             eq_ctx.setState(initial_state)
             # setState only restores positions/velocities/box — not global parameters.
-            _set_alchemical_parameters(eq_ctx, settings.lambda_functions, self._endpoint_lambda)
+            _set_alchemical_parameters(
+                eq_ctx, settings.lambda_functions, self._endpoint_lambda
+            )
             eq_ctx.setVelocitiesToTemperature(temperature)
 
             t0 = time.perf_counter()
